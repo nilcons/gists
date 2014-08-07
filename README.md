@@ -1,4 +1,4 @@
-gists
-=====
+# Nilcons' gists
 
-Code snippets and short notes from Nilcons
+1. Semantically correct `vectorBuilder` for Conduit:
+   [here](vectorBuilder/README.md)
