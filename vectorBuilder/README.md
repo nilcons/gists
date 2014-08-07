@@ -1,41 +1,40 @@
-Semantically correct `vectorBuilder` for Conduit
-================================================
+# Semantically correct, fast `vectorBuilder` for conduit
 
-I've recently read Michael Snoyman's blog post on building vectors
-efficiently for streaming chunked data:
+
+I've recently read Michael Snoyman's blog post on efficient vector building in conduit:
 https://www.fpcomplete.com/blog/2014/07/vectorbuilder-packed-conduit-yielding
 
 It neatly solves an important problem, but it's not perfect. To avoid
 the costly transformer stack overhead, the `vectorBuilder` combinator
 does everything on the level of `IO` (or `ST`, the other monad to
 manipulate mutable vectors). But this means that it cannot `yield` the
-created vector as soon as it fills one, but have to delay until the
+created vector as soon as it fills one. It has to delay it until the
 user code requests more data (and then yields all the created vectors
 at once).
 
 This is hacky and it breaks the nice streaming semantics of
 Conduit. The user has to be aware of this and work-around
-it… All-in-all, it's ugly. So, can we fix it? I wondered…
+it… Can we fix it? I wondered…
 
 ## Angle of attack
 
-The problem is that we cannot "escape" from the middle of an `IO`
+The problem is that we cannot “escape” from the middle of an `IO`
 computation to go back to the level of `ConduitM` to yield the finished
-chunk. One possible fix then is _not_ to go down _all the way_ to
+chunk. One possible fix then, is _not_ to go down _all the way_ to
 `IO`. But to work in an extended IO, where we can temporarily escape
-the computation with a value and then continue from where we left
-off. ("Hmm, I am going to name the resulting abstraction
-Exception–Continuation monad", I thought at this point.)
+the computation with a value and later continue from where we left
+off. (“Hmm, I am going to name the resulting abstraction
+Exception–Continuation monad”, I thought at this point.)
 
 But remember, the point of going down to `IO` was that transformers
-are costly. So I wanted to know how costly are they. How much will we
+are costly. So, I wanted to know how costly are they. How much will we
 have to pay?
 
 ## Reality check
 
-I decided to do some benchmarking: to measure a basically pure `IO`
-computation "lifted" in different transformers. We are talking about
-comparing the following two functions:
+I decided to do some benchmarking: to measure an `IO` computation
+“lifted” into different transformers. We are talking about comparing the
+following two functions:
 
 ```haskell
 direct :: IOVector Int -> IOVector Int -> IO ()
@@ -53,12 +52,12 @@ transformed v1 v2 =
     liftIO $ MV.unsafeWrite v2 (2*i + 1) x
 ```
 
-What's important here is that we are doing _very cheap_ IO operations
-(poking in mutable vectors), which means if there's any overhead,
-we'll see it clearly. (Also, I chose an example similar to Michael's:
-duplicating elements from one vector into another). Note that we have
-3 `liftIO`s inside the `transformed` loop, which we could have
-combined into one. This is on purpose; but what's really important is
+We are doing _very cheap_ IO operations
+(poking in mutable vectors), which means that if there is any overhead,
+we will see it clearly. (I chose an example similar to Michael's:
+duplicating elements from one vector into another).
+Note the 3 `liftIO`s inside the `transformed` loop.
+I intentionally did not combine them into one, but what's really important is
 that the `liftIO`s are _inside_ the loop, not outside.
 
 And the benchmark:
@@ -94,32 +93,32 @@ main = do
 I also benchmarked a few other monad transformers (you can see the
 complete code in [transformedIO.hs](./transformedIO.hs)), in particular `Proxy` (pipes
 library) and `ConduitM`. We know that the overhead there cannot be
-eliminated, but I was interested in just how large it is. Well, it's
+eliminated, but I wanted to see its magnitude. Well, it's
 between 10–200 times of a slow-down. (And there is a significant
 difference between the two libraries, which is weird, as the internal
 structure is quite similar. At least from the standpoint of this
 measurement, as we are not touching any pipes or conduit
 functionality. Maybe this is worth investigating.)
 
-**Warning!** An important note: don't consider this "result" in any way
+**Warning!** An important note: do not consider this “result” in any way
 seriously. The whole thing is _extremely_ sensitive to the exact code
 you are measuring! For example, if you replace `forM_ [0..n-1]` with
 `V.forM_ v`, where `v` is a vector with values `0..n-1`, then the
 above stops being true. And every transformer (except `IdentityT`)
-incurs at least 6× penalty!
+incurs at least a 6× penalty!
 
 Also, playing with the code and rearranging it in different ways I
-once created a version where the transformed variants (with
-`IdentityT`, `MaybeT` and `ContT`) where significantly _faster_ than
+once encountered a version where the transformed variants (with
+`IdentityT`, `MaybeT` and `ContT`) were significantly _faster_ than
 the basic `IO` version. Optimization is tricky, benchmarking is
 tricky, so again: don't take my results at face value. If you need to
-know how a transformer will affect your code — measure your code.
+know how a transformer will affect your code — measure your code!
 
 ## Exception–Continuation monad transformer
 
 OK, now that we think that we have a chance to do this, how should
-this "Exception–Continuation" thingy look like? Well, it should look
-exactly like a minimal conduit or pipe that can only yield. But,
+this “Exception–Continuation” thingy look like? Well, it should look
+exactly like a minimalistic conduit or pipe that can only yield. But,
 written in some sort of continuation passing style.
 
 It should be a topic for another (series) of posts how to come up and
@@ -139,7 +138,7 @@ data ECStep o m a = ECPure a
                   | ECYield o (ECConcreteT o m a)
 ```
 
-But, the "concrete" version is useless for us, as it would incur the
+But, the “concrete” version is useless for us, as it would incur the
 same kind of overhead as conduits or pipes.
 
 Look into the [ECT.hs](./ECT.hs) for details. (Only the first part is
@@ -157,33 +156,33 @@ Michael's `onAwait`.  (But this again, belong more to the topic of
 understanding how to transform regular code to the inverted
 continuation-passing/Codensity style code.)
 
-So finally, what's the result? How does it compare to the original
-"raw" `IO`-based `vectorBuilder`? It's actually faster! I don't really
-know why. It might gain a bit of an advantage from the slightly
-simplified logic, but not much. Anyway, the speed-up is not very big,
-about 12%.
+OK, so how does it compare to the original
+“raw” `IO`-based `vectorBuilder`? Another surprise — it's actually faster!
+I don't really know why. It might gain a bit of an advantage from the slightly
+simplified logic, but not much. Anyway, the speed-up is not big, about 10–15%.
 
 ## Conclusions
 
 A definitive, though cautious, YAY!
 
-The reason for caution is that the measurement is only for one, very
+The reason for caution is that I measured only one, very
 simple test case. (I just used the example from Michael's blog post.)
-And referring back, this is a tricky business. It still remains to be
-seen how it fares in a more complicated real-life example. (Anyone?)
+And referring back, this is not enough to draw a solid conclusion!
+It still remains to be seen how it fares in a more complicated real-life example.
+(Suggestions, anyone?)
 
 I'm also not very satisfied with the type signature of my
 `vectorBuilder`.
 
 1. It is less general than the original version. I am still thinking
-   if anything can be done about it. (But, note that the _use_ didn't
-   chnage at all: compare `rechunk3` and `rechunk4` in
+   if anything can be done about this. (But, note that the _use_ didn't
+   change at all: compare `rechunk3` and `rechunk4` in
    [rechunk.hs](./rechunk.hs).)
-2. The `ECT` appears in the API. There's nothing to be done about it
-   (this _is_ the solution, after all), but it needs to be properly
-   explained for the users. Anyone knows if this already exists
-   somewhere? (Oh, and maybe this can be done with the regular
-   `ContT`. I have to think about it...)
+2. The `ECT` appears in the API. There's nothing to be done about this
+   (it _is_ the solution, after all), but it needs to be properly
+   explained to the users. Anyone knows if it already exists
+   somewhere? (Or maybe this can be done with something else that already exists?
+   I have to think about it…)
 
 I think, `vectorBuilder` combinator is a great addition to the Conduit
 family, and with the proper semantics it will be even greater!
